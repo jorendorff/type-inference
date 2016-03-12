@@ -1,18 +1,18 @@
 -- # infer.hs - A simple implementation of type inference
--- 
+--
 -- The point of type inference is to take a program and assign a type to every
 -- variable and every expression in the program.
--- 
+--
 -- To do this, we'll need ways of representing programs and types in memory.
 -- We'll need some way to represent all the type signatures of the functions that
 -- make up a language's standard library.
--- 
+--
 -- Then, using those parts, we'll write code that takes a program and a standard
 -- library as arguments, and returns a type-annotated copy of that program.
--- 
--- 
+--
+--
 -- ## Using the `ST` monad
--- 
+--
 -- The only sensible algorithm I know for type inference is stateful,
 -- so we'll be writing stateful Haskell code today, using the `ST` monad.
 
@@ -27,8 +27,21 @@ import Data.STRef
 
 
 -- ## Types
--- 
+--
 -- I said we'd need a way to represent types and programs in memory. Here goes:
+
+data Type = TInt
+          | TString
+          | TFun Type Type
+          deriving (Eq, Show)
+
+-- A type is either `Int`, `String`, or a function type `(a -> b)` where a and b
+-- are two types. This is pretty bare-bones and we could elaborate on it a great deal.
+-- But the big problem here is: this `Type` type is stateless, and we will need
+-- mutable type values (!) to run the inference algorithm.
+--
+-- Therefore we have the `IType` type (`I` for inference). This is what we'll use
+-- during the process of inferring types.
 
 data IType s = ITInt
              | ITString
@@ -36,35 +49,39 @@ data IType s = ITInt
              | ITVar (STRef s (Maybe (IType s)))
              deriving Eq
 
-data Type = TInt
-          | TString
-          | TFun Type Type
-          | TVar String
-          | TForAll String Type
+-- For testing, I'd like to use the simpler `Type` (which doesn't have that
+-- weird `s` parameter floating around), so I need a function to translate:
+toType :: IType s -> ST s Type
+toType ITInt = return TInt
+toType ITString = return TString
+toType (ITFun a b) = do
+  a' <- toType a
+  b' <- toType b
+  return $ TFun a' b'
+toType (ITVar cell) = do
+  c <- readSTRef cell
+  case c of
+    Nothing -> error "unresolved type variable"
+    Just t -> toType t
 
--- A type is either `Int`, `String`, or a function type `(a -> b)` where a and b
--- are two types. This is pretty bare-bones and we could elaborate on it a great deal.
---
--- XXX TODO update this text
---
+-- Like `Type`, `IType` has `Int`, `String`, and `Fun` types.
 -- But then we also have `TVar`, which represents *unknown types*,
 -- what we'll call "type variables".
 -- Each `TVar` contains a mutable cell
 -- so that we can add more information about the type as we learn more.
--- 
--- *   `TVar (newSTRef Nothing)` is an unknown type.
--- 
--- *   `TVar (newSTRef (Just TInt))` is the type Int - this is an initially
+--
+-- *   `ITVar (newSTRef Nothing)` is an unknown type.
+--
+-- *   `ITVar (newSTRef (Just ITInt))` is the type Int - this is an initially
 --     unknown type that we later inferred.
--- 
--- *   `TVar (newSTRef (Just v))`, where v is also a `TVar`, is a type that has
+--
+-- *   `ITVar (newSTRef (Just v))`, where v is also an `ITVar`, is a type that has
 --     been *unified* with another type variable. v might already be known, or it
 --     may still be unknown; but we do know that this type and v are the same.
--- 
--- Now we have a few simple functions on types.
--- 
--- This one simply converts a type to a string, for display:
 
+-- Now we have a few simple functions on types.
+
+-- Convert a type to a string, for display.
 formatType :: IType s -> ST s String
 formatType ITInt = return "Int"
 formatType ITString = return "String"
@@ -78,8 +95,17 @@ formatType v = do
     ITVar _ -> return "_"
     other -> formatType other
 
--- This one resolves type variables that have already been inferred or partly inferred:
-
+-- Unwrap type variables.
+--
+-- If the argument is a type variable that has already been unified with
+-- another type, return that type (after unwrapping it as well, since there can
+-- be chains of unifications).  Otherwise, return the argument unchanged.
+--
+-- There's one other sneaky thing going on here. If we *do* encounter a chain of
+-- type variables that point to other type variables etc., this function quietly
+-- eliminates the chain by changing *every* mutable cell in the chain to point
+-- directly to the type at the end of the chain. (This isn't necessary for
+-- correctness; it's just a speed hack.)
 unwrap :: IType s -> ST s (IType s)
 unwrap (ITVar v) = do
   t <- readSTRef v
@@ -93,8 +119,10 @@ unwrap other = return other
 
 
 -- ## Expressions
--- 
--- We also need a way to represent programs in memory, and that's the `Expr` type:
+--
+-- We also need a way to represent programs in memory, and that's the `Expr` type.
+-- The way this is defined is a little wonky, because I want to be able to
+-- store location information alongside every node.
 
 data Expr_ e = Name String
            | Literal Value
@@ -140,8 +168,8 @@ data TypeOrConstructor s = TocType (IType s)
 -- When it's not used in a pattern, a constructor has a type just like
 -- any other binding. A no-argument constructor has a data type;
 -- constructors with arguments have a function type.
-toType (TocType t) = t
-toType (TocConstructor args rtype) = foldr ITFun rtype args
+tocToType (TocType t) = t
+tocToType (TocConstructor args rtype) = foldr ITFun rtype args
 
 -- Values that can be represented as literals in programs.
 data Value = VInt Int | VString String
@@ -179,7 +207,7 @@ lookupType env name = do
   result <- lookupToc env name
   return $ case result of
     Nothing -> Nothing
-    Just toc -> Just (toType toc)
+    Just toc -> Just (tocToType toc)
 
 lookupConstructorTypes :: TypeEnv s -> Location -> String -> ST s (Maybe ([IType s], IType s))
 lookupConstructorTypes env loc name = do
@@ -235,54 +263,54 @@ reportError env loc message =
 
 -- ## Type inference
 
-infer :: TypeEnv s -> Expr -> IType s -> ST s ()
+inferExprType :: TypeEnv s -> Expr -> IType s -> ST s ()
 
-infer env (Expr loc (Name s)) expectedType = do
+inferExprType env (Expr loc (Name s)) expectedType = do
   result <- lookupType env s
   case result of
     Nothing -> reportError env loc ("undefined variable `" ++ s ++ "`")
     Just actualType -> unify env loc expectedType actualType
 
-infer env (Expr loc (Literal v)) expectedType =
+inferExprType env (Expr loc (Literal v)) expectedType =
   unify env loc expectedType (typeOf v)
 
-infer env (Expr loc (Lambda argLocation arg body)) expectedType = do
+inferExprType env (Expr loc (Lambda argLocation arg body)) expectedType = do
   pushScope env
   argType <- newTypeVariable env argLocation
   bodyType <- newTypeVariable env (exprLocation body)
   bind env argLocation arg argType
-  infer env body bodyType
+  inferExprType env body bodyType
   popScope env
   unify env loc (ITFun argType bodyType) expectedType
 
-infer env (Expr _ (Call fn arg)) expectedType = do
+inferExprType env (Expr _ (Call fn arg)) expectedType = do
   argType <- newTypeVariable env (exprLocation arg)
-  infer env fn (ITFun argType expectedType)
-  infer env arg argType
+  inferExprType env fn (ITFun argType expectedType)
+  inferExprType env arg argType
 
-infer env (Expr _ (Case d cases)) expectedType = do
+inferExprType env (Expr _ (Case d cases)) expectedType = do
   dType <- newTypeVariable env (exprLocation d)
-  infer env d dType
+  inferExprType env d dType
   let inferCase (pattern, result) = do
         pushScope env
-        inferPattern env pattern dType
-        infer env result expectedType
+        inferPatternType env pattern dType
+        inferExprType env result expectedType
         popScope env
   sequence_ $ map inferCase cases
 
 -- Patterns, too, have types which must be inferred.
 -- They can also have sub-patterns whose types must be inferred recursively.
-inferPattern :: TypeEnv s -> Pattern -> IType s -> ST s ()
+inferPatternType :: TypeEnv s -> Pattern -> IType s -> ST s ()
 
-inferPattern env (Pattern _ PWildcard) expectedType = return ()
+inferPatternType env (Pattern _ PWildcard) expectedType = return ()
 
-inferPattern env (Pattern loc (PLiteral value)) expectedType =
+inferPatternType env (Pattern loc (PLiteral value)) expectedType =
   unify env loc (typeOf value) expectedType
 
-inferPattern env (Pattern loc (PVar name)) expectedType =
+inferPatternType env (Pattern loc (PVar name)) expectedType =
   bind env loc name expectedType
 
-inferPattern env (Pattern loc (PConstructor nameLocation name argPatterns)) expectedType = do
+inferPatternType env (Pattern loc (PConstructor nameLocation name argPatterns)) expectedType = do
   m <- lookupConstructorTypes env nameLocation name
   case m of
     Nothing -> reportError env nameLocation ("no such constructor '" ++ name ++ "'")
@@ -293,28 +321,44 @@ inferPattern env (Pattern loc (PConstructor nameLocation name argPatterns)) expe
                                   "expected " ++ show (length argTypes) ++ ", " ++
                                   "got " ++ show (length argPatterns) ++ ")")
         else let inferArgPattern (pattern, expectedType) =
-                   inferPattern env pattern expectedType
+                   inferPatternType env pattern expectedType
              in sequence_ $ map inferArgPattern (zip argPatterns argTypes)
 
 
 -- ## A simple test
 
-test1 = runST $ do
+infer :: Expr -> Either [String] Type
+infer expr = runST $ do
   env <- newTypeEnv
   pushScope env
   bind env (0, 0) "parse" (ITFun ITString ITInt)
   t <- newTypeVariable env (0, 11)
-  infer env (Expr (0, 11) (Call
-                           (Expr (0, 5) (Name "parse"))
-                           (Expr (6, 11) (Literal (VString "123"))))) t
+  inferExprType env expr t
   popScope env
   errors <- readSTRef (envErrors env)
-  t' <- unwrap t
-  tstr <- formatType t'
   if errors /= []
-    then return errors
-    else if t' /= ITInt
-         then return ["test failed: inferred type was " ++ tstr ++ ", expected Int"]
-         else return ["passed"]
+    then return $ Left errors
+    else do t' <- toType t
+            return $ Right t'
 
-main = sequence_ $ map putStrLn $ test1
+assertInfersType expr t =
+  case infer expr of
+    Left errors -> errors
+    Right answer -> if answer == t
+                    then ["passed"]
+                    else ["test failed: inferred type was " ++ show answer ++ ", expected " ++ show t]
+
+test1 = assertInfersType
+    (Expr (0, 11) (Call
+                   (Expr (0, 5) (Name "parse"))
+                   (Expr (6, 11) (Literal (VString "123")))))
+    TInt
+
+test2 = assertInfersType
+        (Expr (0, 15) (Lambda (1, 2) "x"
+                       (Expr (7, 15) (Call
+                                      (Expr (7, 12) (Name "parse"))
+                                      (Expr (14, 15) (Name "x"))))))
+        (TFun TString TInt)
+
+main = sequence_ $ map putStrLn $ (test1 ++ test2)
