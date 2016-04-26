@@ -18,6 +18,24 @@
 
 import Control.Monad.ST
 import Data.STRef
+import System.IO
+
+
+-- ## Programs as values
+--
+-- `Expr`, short for "expression", is the type of programs in this
+-- mini-language.  The definition is in a separate module, but to summarize, an
+-- expression is one of these:
+--
+-- *   an identifier, like `map`, `filter`, `True`, etc.
+-- *   a string, like `"hello world"`
+-- *   a number, like `42`
+-- *   a lambda-expression, like `\ f -> f 0`
+-- *   a case-expression, like `case x of { True -> 1; False -> 0 }`
+-- *   a function call, like `f x`
+
+import Expr
+import Parse
 
 -- I'm a big fan of `ST`. You can write Python code in Haskell!
 -- But the best thing about it is that *statefulness doesn't leak*
@@ -118,36 +136,6 @@ unwrap (ITVar v) = do
 unwrap other = return other
 
 
--- ## Expressions
---
--- We also need a way to represent programs in memory, and that's the `Expr` type.
--- The way this is defined is a little wonky, because I want to be able to
--- store location information alongside every node.
-
-data Expr_ e = Name String
-           | Literal Value
-           | Lambda Location String e
-           | Call e e
-           | Case e [(Pattern, e)]
-
-type Location = (Int, Int)
-
-data Expr = Expr Location (Expr_ Expr)
-
-exprLocation (Expr loc _) = loc
-
--- Case expressions contain *patterns,* so we'll need a definition for that:
-
-data Pattern_ = PWildcard
-              | PLiteral Value
-              | PVar String
-              | PConstructor Location String [Pattern]
-
-data Pattern = Pattern Location Pattern_
-
-patternLocation (Pattern loc _) = loc
-
-
 -- ## Constructors
 --
 -- A constructor, like Just or Nothing or True or False,
@@ -171,10 +159,7 @@ data TypeOrConstructor s = TocType (IType s)
 tocToType (TocType t) = t
 tocToType (TocConstructor args rtype) = foldr ITFun rtype args
 
--- Values that can be represented as literals in programs.
-data Value = VInt Int | VString String
-
-typeOf (VInt _) = ITInt
+typeOf (VInteger _) = ITInt
 typeOf (VString _) = ITString
 
 
@@ -331,8 +316,8 @@ infer :: Expr -> Either [String] Type
 infer expr = runST $ do
   env <- newTypeEnv
   pushScope env
-  bind env (0, 0) "parse" (ITFun ITString ITInt)
-  t <- newTypeVariable env (0, 11)
+  bind env ((1, 0), (1, 0)) "parse" (ITFun ITString ITInt)
+  t <- newTypeVariable env ((1, 0), (1, 11))
   inferExprType env expr t
   popScope env
   errors <- readSTRef (envErrors env)
@@ -341,24 +326,35 @@ infer expr = runST $ do
     else do t' <- toType t
             return $ Right t'
 
-assertInfersType expr t =
-  case infer expr of
-    Left errors -> errors
-    Right answer -> if answer == t
-                    then ["passed"]
-                    else ["test failed: inferred type was " ++ show answer ++ ", expected " ++ show t]
+assertInfersType s t =
+  case fullParseExpr s of
+    Left err -> putStrLn (show err)
+    Right expr ->
+      case infer expr of
+        Left errors -> mapM_ putStrLn errors
+        Right answer ->
+          if answer == t
+          then return ()
+          else putStrLn $ "test failed: inferred type was " ++ show answer ++ ", expected " ++ show t
 
-test1 = assertInfersType
-    (Expr (0, 11) (Call
-                   (Expr (0, 5) (Name "parse"))
-                   (Expr (6, 11) (Literal (VString "123")))))
-    TInt
+test1 = assertInfersType "parse \"123\"" TInt
 
-test2 = assertInfersType
-        (Expr (0, 15) (Lambda (1, 2) "x"
-                       (Expr (7, 15) (Call
-                                      (Expr (7, 12) (Name "parse"))
-                                      (Expr (14, 15) (Name "x"))))))
-        (TFun TString TInt)
+test2 = assertInfersType "\\x -> parse x" (TFun TString TInt)
 
-main = sequence_ $ map putStrLn $ (test1 ++ test2)
+main = do
+  runParserTests
+  test1
+  test2
+  interact1
+
+interact1 = do
+  putStr "infer> "
+  hFlush stdout
+  line <- getLine
+  case fullParseExpr line of
+    Left err -> putStrLn (show err)
+    Right expr ->
+      case infer expr of
+        Left errors -> mapM_ putStrLn errors
+        Right answer -> putStrLn $ show answer
+  interact1
