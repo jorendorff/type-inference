@@ -38,7 +38,7 @@ data Type = TInt
 -- A type is either `Int`, `String`, or a function type `(a -> b)` where a and b
 -- are two types. This is pretty bare-bones and we could elaborate on it a great deal.
 -- But the big problem here is: this `Type` type is stateless, and we will need
--- mutable type values (!) to run the inference algorithm.
+-- mutable type variables (!) to run the inference algorithm.
 --
 -- Therefore we have the `IType` type (`I` for inference). This is what we'll use
 -- during the process of inferring types.
@@ -48,21 +48,6 @@ data IType s = ITInt
              | ITFun (IType s) (IType s)
              | ITVar (STRef s (Maybe (IType s)))
              deriving Eq
-
--- For testing, I'd like to use the simpler `Type` (which doesn't have that
--- weird `s` parameter floating around), so I need a function to translate:
-toType :: IType s -> ST s Type
-toType ITInt = return TInt
-toType ITString = return TString
-toType (ITFun a b) = do
-  a' <- toType a
-  b' <- toType b
-  return $ TFun a' b'
-toType (ITVar cell) = do
-  c <- readSTRef cell
-  case c of
-    Nothing -> error "unresolved type variable"
-    Just t -> toType t
 
 -- Like `Type`, `IType` has `Int`, `String`, and `Fun` types.
 -- But then we also have `TVar`, which represents *unknown types*,
@@ -80,6 +65,21 @@ toType (ITVar cell) = do
 --     may still be unknown; but we do know that this type and v are the same.
 
 -- Now we have a few simple functions on types.
+
+-- For testing, I'd like to use the simpler `Type` (which doesn't have that
+-- weird `s` parameter floating around), so I need a function to translate:
+toType :: IType s -> ST s Type
+toType ITInt = return TInt
+toType ITString = return TString
+toType (ITFun a b) = do
+  a' <- toType a
+  b' <- toType b
+  return $ TFun a' b'
+toType (ITVar cell) = do
+  c <- readSTRef cell
+  case c of
+    Nothing -> error "unresolved type variable"
+    Just t -> toType t
 
 -- Convert a type to a string, for display.
 formatType :: IType s -> ST s String
