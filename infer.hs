@@ -92,17 +92,19 @@ instance Show Type where
 
 -- For testing, I'd like to use the simpler `Type` (which doesn't have that
 -- weird `s` parameter floating around), so I need a function to translate:
-toType :: IType s -> ST s Type
-toType ITInt = return TInt
-toType ITString = return TString
+toType :: IType s -> ST s (Maybe Type)
+toType ITInt = return $ Just TInt
+toType ITString = return $ Just TString
 toType (ITFun a b) = do
   a' <- toType a
   b' <- toType b
-  return $ TFun a' b'
+  case (a', b') of
+    (Just ta, Just tb) -> return $ Just (TFun ta tb)
+    _ -> return Nothing
 toType (ITVar cell) = do
   c <- readSTRef cell
   case c of
-    Nothing -> error "unresolved type variable"
+    Nothing -> return Nothing
     Just t -> toType t
 
 -- Convert a type to a string, for display.
@@ -330,7 +332,9 @@ infer expr = runST $ do
   if errors /= []
     then return $ Left errors
     else do t' <- toType t
-            return $ Right t'
+            case t' of
+              Nothing -> return $ Left ["unresolved type variable"]
+              Just t'' -> return $ Right t''
 
 assertInfersType s t =
   case fullParseExpr s of
