@@ -51,7 +51,7 @@ import Parse
 data Type = TInt
           | TString
           | TFun Type Type
-          deriving (Eq, Show)
+          deriving Eq
 
 -- A type is either `Int`, `String`, or a function type `(a -> b)` where a and b
 -- are two types. This is pretty bare-bones and we could elaborate on it a great deal.
@@ -66,6 +66,12 @@ data IType s = ITInt
              | ITFun (IType s) (IType s)
              | ITVar (STRef s (Maybe (IType s)))
              deriving Eq
+
+-- Types should be printable.
+instance Show Type where
+  show TInt = "Int"
+  show TString = "String"
+  show (TFun a b) = "(" ++ show a ++ " -> " ++ show b ++ ")"
 
 -- Like `Type`, `IType` has `Int`, `String`, and `Fun` types.
 -- But then we also have `TVar`, which represents *unknown types*,
