@@ -37,16 +37,16 @@ import System.IO
 import Expr
 import Parse
 
--- I'm a big fan of `ST`. You can write Python code in Haskell!
--- But the best thing about it is that *statefulness doesn't leak*
--- to the rest of your program. Variables that you create in `ST` code
--- can only be read or written from within the same execution of that `ST` code.
--- All inputs and outputs are immutable values.
+-- I'm a fan of `ST`. You can write Python code in Haskell!  But the best thing
+-- about it is that *statefulness doesn't leak* to the rest of your program.
+-- Variables that you create in `ST` code can only be read or written from
+-- within the same execution of that `ST` code.  All inputs and outputs are
+-- immutable values.
 
 
 -- ## Types
 --
--- I said we'd need a way to represent types and programs in memory. Here goes:
+-- I said we'd need a way to represent types in memory. Here goes:
 
 data Type = TInt
           | TString
