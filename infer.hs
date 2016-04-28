@@ -61,10 +61,10 @@ data Type = TInt
 -- Therefore we have the `MType` type (`M` for mutability). This is what we'll use
 -- during the process of inferring types.
 
-data MType s = ITInt
-             | ITString
-             | ITFun (MType s) (MType s)
-             | ITVar (STRef s (Maybe (MType s)))
+data MType s = MTInt
+             | MTString
+             | MTFun (MType s) (MType s)
+             | MTVar (STRef s (Maybe (MType s)))
              deriving Eq
 
 -- Types should be printable.
@@ -79,12 +79,12 @@ instance Show Type where
 -- Each `TVar` contains a mutable cell
 -- so that we can add more information about the type as we learn more.
 --
--- *   `ITVar (newSTRef Nothing)` is an unknown type.
+-- *   `MTVar (newSTRef Nothing)` is an unknown type.
 --
--- *   `ITVar (newSTRef (Just ITInt))` is the type Int - this is an initially
+-- *   `MTVar (newSTRef (Just MTInt))` is the type Int - this is an initially
 --     unknown type that we later inferred.
 --
--- *   `ITVar (newSTRef (Just v))`, where v is also an `ITVar`, is a type that has
+-- *   `MTVar (newSTRef (Just v))`, where v is also an `MTVar`, is a type that has
 --     been *unified* with another type variable. v might already be known, or it
 --     may still be unknown; but we do know that this type and v are the same.
 
@@ -93,15 +93,15 @@ instance Show Type where
 -- For testing, I'd like to use the simpler `Type` (which doesn't have that
 -- weird `s` parameter floating around), so I need a function to translate:
 toType :: MType s -> ST s (Maybe Type)
-toType ITInt = return $ Just TInt
-toType ITString = return $ Just TString
-toType (ITFun a b) = do
+toType MTInt = return $ Just TInt
+toType MTString = return $ Just TString
+toType (MTFun a b) = do
   a' <- toType a
   b' <- toType b
   case (a', b') of
     (Just ta, Just tb) -> return $ Just (TFun ta tb)
     _ -> return Nothing
-toType (ITVar cell) = do
+toType (MTVar cell) = do
   c <- readSTRef cell
   case c of
     Nothing -> return Nothing
@@ -109,16 +109,16 @@ toType (ITVar cell) = do
 
 -- Convert a type to a string, for display.
 formatType :: MType s -> ST s String
-formatType ITInt = return "Int"
-formatType ITString = return "String"
-formatType (ITFun a r) = do
+formatType MTInt = return "Int"
+formatType MTString = return "String"
+formatType (MTFun a r) = do
   astr <- formatType a
   rstr <- formatType r
   return $ "(" ++ astr ++ " -> " ++ rstr ++ ")"
 formatType v = do
   u <- unwrap v
   case u of
-    ITVar _ -> return "_"
+    MTVar _ -> return "_"
     other -> formatType other
 
 -- Unwrap type variables.
@@ -133,10 +133,10 @@ formatType v = do
 -- directly to the type at the end of the chain. (This isn't necessary for
 -- correctness; it's just a speed hack.)
 unwrap :: MType s -> ST s (MType s)
-unwrap (ITVar v) = do
+unwrap (MTVar v) = do
   t <- readSTRef v
   case t of
-    Nothing -> return $ ITVar v
+    Nothing -> return $ MTVar v
     Just u -> do
       u' <- unwrap u
       writeSTRef v (Just u')
@@ -165,10 +165,10 @@ data TypeOrConstructor s = TocType (MType s)
 -- any other binding. A no-argument constructor has a data type;
 -- constructors with arguments have a function type.
 tocToType (TocType t) = t
-tocToType (TocConstructor args rtype) = foldr ITFun rtype args
+tocToType (TocConstructor args rtype) = foldr MTFun rtype args
 
-typeOf (VInteger _) = ITInt
-typeOf (VString _) = ITString
+typeOf (VInteger _) = MTInt
+typeOf (VString _) = MTString
 
 
 -- ## Type environments
@@ -253,7 +253,7 @@ bind env loc name bindingType = do
 newTypeVariable :: TypeEnv s -> Location -> ST s (MType s)
 newTypeVariable env loc = do
   r <- newSTRef Nothing
-  return $ ITVar r
+  return $ MTVar r
 
 -- Add an error the the environment's list of errors.
 reportError :: TypeEnv s -> Location -> String -> ST s ()
@@ -310,16 +310,16 @@ unify env loc expectedType actualType = do
     -- Or maybe both "expected" and "actual" are empty type variables. In that
     -- case, the assignment changes one type variable to point at the other,
     -- storing the discovery that the the two variables must be the same type.
-    (ITVar v1, _) -> writeSTRef v1 (Just a)
-    (_, ITVar v2) -> writeSTRef v2 (Just e)
+    (MTVar v1, _) -> writeSTRef v1 (Just a)
+    (_, MTVar v2) -> writeSTRef v2 (Just e)
 
     -- If the expected type and the actual type are identical, we're in great shape!
     -- There's nothing to do.
-    (ITInt, ITInt) -> return ()
-    (ITString, ITString) -> return ()
+    (MTInt, MTInt) -> return ()
+    (MTString, MTString) -> return ()
 
     -- To unify two function types, simply unify the argument types and the return types.
-    (ITFun a1 r1, ITFun a2 r2) -> do
+    (MTFun a1 r1, MTFun a2 r2) -> do
       unify env loc a1 a2
       unify env loc r1 r2
 
@@ -351,11 +351,11 @@ inferExprType env (Expr loc (Lambda argLocation arg body)) expectedType = do
   bind env argLocation arg argType
   inferExprType env body bodyType
   popScope env
-  unify env loc (ITFun argType bodyType) expectedType
+  unify env loc (MTFun argType bodyType) expectedType
 
 inferExprType env (Expr _ (Call fn arg)) expectedType = do
   argType <- newTypeVariable env (exprLocation arg)
-  inferExprType env fn (ITFun argType expectedType)
+  inferExprType env fn (MTFun argType expectedType)
   inferExprType env arg argType
 
 inferExprType env (Expr _ (Case d cases)) expectedType = do
@@ -401,7 +401,7 @@ infer :: Expr -> Either [String] Type
 infer expr = runST $ do
   env <- newTypeEnv
   pushScope env
-  bind env ((1, 0), (1, 0)) "parse" (ITFun ITString ITInt)
+  bind env ((1, 0), (1, 0)) "parse" (MTFun MTString MTInt)
   t <- newTypeVariable env ((1, 0), (1, 11))
   inferExprType env expr t
   popScope env
