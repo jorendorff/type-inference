@@ -172,6 +172,16 @@ typeOf (VString _) = ITString
 
 
 -- ## Type environments
+--
+-- A type environment is everything you know so far about the types in a program.
+--
+-- Actually, in my program, the `TypeEnv` is two pieces of mutable state that
+-- we carry around through the whole algorithm: the types of all bindings
+-- currently in scope; and the accumulated type errors we've found so far.
+--
+-- There's more mutation here than I would like, but once you go down the road
+-- of writing a Python program in Haskell, it's hard to know when to apply the
+-- brakes. :-\
 
 data TypeEnv s = TypeEnv {
   envScopes :: STRef s [[(String, TypeOrConstructor s)]],
