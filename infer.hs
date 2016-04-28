@@ -188,6 +188,9 @@ data TypeEnv s = TypeEnv {
   envErrors :: STRef s [String]
 }
 
+-- Create an empty type environment. Initially it doesn't even have a global
+-- scope, so before creating any global variables you'll have to use
+-- `pushScope` to create one.
 newTypeEnv :: ST s (TypeEnv s)
 newTypeEnv = do
   scopes <- newSTRef []
@@ -195,16 +198,22 @@ newTypeEnv = do
   return $ TypeEnv { envScopes = scopes,
                      envErrors = errors }
 
+-- Look up a name. The result is a `Maybe TypeOrConstructor`: a `TocType` if
+-- the name is a binding, a `TocConstructor` if it's a constructor, and
+-- `Nothing` if the name is undefined.
 lookupToc :: TypeEnv s -> String -> ST s (Maybe (TypeOrConstructor s))
 lookupToc env name = do
   scopes <- readSTRef (envScopes env)
   return $ multiLookup name scopes
 
+-- Helper function for lookupToc: look up a key in a list of alists.
 multiLookup _ [] = Nothing
 multiLookup key (alist:etc) = case lookup key alist of
   Nothing -> multiLookup key etc
   Just v -> Just v
 
+-- Lookup the type of a name. Like `lookupToc`, but if the name happens to be a
+-- constructor, we just return the type of that constructor.
 lookupType :: TypeEnv s -> String -> ST s (Maybe (MType s))
 lookupType env name = do
   result <- lookupToc env name
@@ -220,14 +229,17 @@ lookupConstructorTypes env loc name = do
     Just (TocType _) -> Nothing
     Just (TocConstructor argTypes rtype) -> Just (argTypes, rtype)
 
+-- Add a scope to the environment, nested inside all other scopes.
 pushScope :: TypeEnv s -> ST s ()
 pushScope env =
   modifySTRef (envScopes env) ([] :)
 
+-- Remove the innermost scope from the environment.
 popScope :: TypeEnv s -> ST s ()
 popScope env =
   modifySTRef (envScopes env) tail
 
+-- Add a binding to the innermost scope.
 bind :: TypeEnv s -> Location -> String -> MType s -> ST s ()
 bind env loc name bindingType = do
   (scope : outer) <- readSTRef (envScopes env)
@@ -237,11 +249,13 @@ bind env loc name bindingType = do
   let scope' = (name, TocType bindingType) : scope
   writeSTRef (envScopes env) (scope' : outer)
 
+-- Create a new type variable, initially unassigned.
 newTypeVariable :: TypeEnv s -> Location -> ST s (MType s)
 newTypeVariable env loc = do
   r <- newSTRef Nothing
   return $ ITVar r
 
+-- Add an error the the environment's list of errors.
 reportError :: TypeEnv s -> Location -> String -> ST s ()
 reportError env loc message =
   modifySTRef (envErrors env) (message :)
