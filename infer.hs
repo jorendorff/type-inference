@@ -155,7 +155,7 @@ unwrap other = return other
 --     data TypeOrConstructor s = TypeOrConstructor {
 --         type :: MType s, isConstructor :: Bool }
 --
--- but then when analyzing case expressions, we'd have to reverse-engineer the
+-- but then when analyzing case expressions, we'd have to re-derive the
 -- field types from the constructor type.)
 
 data TypeOrConstructor s = TocType (MType s)
@@ -210,23 +210,6 @@ lookupConstructorTypes env loc name = do
     Just (TocType _) -> Nothing
     Just (TocConstructor argTypes rtype) -> Just (argTypes, rtype)
 
-unify :: TypeEnv s -> Location -> MType s -> MType s -> ST s ()
-unify env loc expectedType actualType = do
-  e <- unwrap expectedType
-  a <- unwrap actualType
-  case (e, a) of
-    (ITVar v1, _) -> writeSTRef v1 (Just a)
-    (_, ITVar v2) -> writeSTRef v2 (Just e)
-    (ITInt, ITInt) -> return ()
-    (ITString, ITString) -> return ()
-    (ITFun a1 r1, ITFun a2 r2) -> do
-      unify env loc a1 a2
-      unify env loc r1 r2
-    (_, _) -> do
-      estr <- formatType e
-      astr <- formatType a
-      reportError env loc ("mismatched types (expected " ++ estr ++ ", got " ++ astr ++ ")")
-
 pushScope :: TypeEnv s -> ST s ()
 pushScope env =
   modifySTRef (envScopes env) ([] :)
@@ -252,6 +235,76 @@ newTypeVariable env loc = do
 reportError :: TypeEnv s -> Location -> String -> ST s ()
 reportError env loc message =
   modifySTRef (envErrors env) (message :)
+
+
+-- ## Type unification
+--
+-- The main trick in type inference is called *unification*, and it's used to
+-- cross-check and combine pieces of information figured out while examining
+-- different parts of the program.
+--
+-- At every node in the tree, we can compute an *actual type*, which is
+-- everything we can guess from looking at that subtree only, and an *expected
+-- type*, which is everything we can guess from looking at the rest of the tree
+-- (the context only). Unification simply takes these two partially-figured-out
+-- types and (a) checks that they agree; (b) refines each type with information
+-- that only the other had before.
+--
+-- For example, in the expression `sum (map (\f -> f 0) fns)`,
+-- suppose we're looking at the lambda.
+--
+-- *   The actual type of `\f -> f 0` is something like `(Int -> ?1) -> ?1`.
+--     Without peeking at the context, we can't guess the return type.
+--
+-- *   The expected type is what we'd guess by looking only at `sum (map ___ fns)`.
+--     This depends on the types of `sum`, `map`, and `fns`. Suppose we know `sum`
+--     adds up a list of `Int`s, and `map` is the usual, but we don't yet know `fns`.
+--     The type we would infer here is `?2 -> Int`.
+--
+-- All of this is input to the unification algorithm.
+--
+-- In this case, unification will succeed, because the two types are compatible,
+-- and it will fill in the type variables: `?1` is `Int`, and `?2` is `(Int -> Int)`.
+--
+-- Unification turns out to be about half of type inference, and yet it's
+-- easy to read and understand. I'll leave the rest of the explaining to the code:
+
+unify :: TypeEnv s -> Location -> MType s -> MType s -> ST s ()
+unify env loc expectedType actualType = do
+  e <- unwrap expectedType
+  a <- unwrap actualType
+  case (e, a) of
+    -- If either the "expected" or the "actual" type is an empty type variable,
+    -- populate it with whatever we discovered on the other side.  (The
+    -- `writeSTRef` call below is what an assignment to a mutable variable
+    -- looks like in Haskell.)
+    --
+    -- For example, maybe "expected" is empty because we had no context clues
+    -- that told us what to expect here, but the actual type is Int. Great!
+    -- Then that type variable must be `Int`; populate it.
+    --
+    -- Or maybe both "expected" and "actual" are empty type variables. In that
+    -- case, the assignment changes one type variable to point at the other,
+    -- storing the discovery that the the two variables must be the same type.
+    (ITVar v1, _) -> writeSTRef v1 (Just a)
+    (_, ITVar v2) -> writeSTRef v2 (Just e)
+
+    -- If the expected type and the actual type are identical, we're in great shape!
+    -- There's nothing to do.
+    (ITInt, ITInt) -> return ()
+    (ITString, ITString) -> return ()
+
+    -- To unify two function types, simply unify the argument types and the return types.
+    (ITFun a1 r1, ITFun a2 r2) -> do
+      unify env loc a1 a2
+      unify env loc r1 r2
+
+    -- In our type system, everything else is an error.
+    (_, _) -> do
+      estr <- formatType e
+      astr <- formatType a
+      reportError env loc ("mismatched types (expected " ++ estr ++ ", got " ++ astr ++ ")")
+
 
 
 -- ## Type inference
