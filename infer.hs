@@ -58,13 +58,13 @@ data Type = TInt
 -- But the big problem here is: this `Type` type is stateless, and we will need
 -- mutable type variables (!) to run the inference algorithm.
 --
--- Therefore we have the `IType` type (`I` for inference). This is what we'll use
+-- Therefore we have the `MType` type (`M` for mutability). This is what we'll use
 -- during the process of inferring types.
 
-data IType s = ITInt
+data MType s = ITInt
              | ITString
-             | ITFun (IType s) (IType s)
-             | ITVar (STRef s (Maybe (IType s)))
+             | ITFun (MType s) (MType s)
+             | ITVar (STRef s (Maybe (MType s)))
              deriving Eq
 
 -- Types should be printable.
@@ -73,7 +73,7 @@ instance Show Type where
   show TString = "String"
   show (TFun a b) = "(" ++ show a ++ " -> " ++ show b ++ ")"
 
--- Like `Type`, `IType` has `Int`, `String`, and `Fun` types.
+-- Like `Type`, `MType` has `Int`, `String`, and `Fun` types.
 -- But then we also have `TVar`, which represents *unknown types*,
 -- what we'll call "type variables".
 -- Each `TVar` contains a mutable cell
@@ -92,7 +92,7 @@ instance Show Type where
 
 -- For testing, I'd like to use the simpler `Type` (which doesn't have that
 -- weird `s` parameter floating around), so I need a function to translate:
-toType :: IType s -> ST s (Maybe Type)
+toType :: MType s -> ST s (Maybe Type)
 toType ITInt = return $ Just TInt
 toType ITString = return $ Just TString
 toType (ITFun a b) = do
@@ -108,7 +108,7 @@ toType (ITVar cell) = do
     Just t -> toType t
 
 -- Convert a type to a string, for display.
-formatType :: IType s -> ST s String
+formatType :: MType s -> ST s String
 formatType ITInt = return "Int"
 formatType ITString = return "String"
 formatType (ITFun a r) = do
@@ -132,7 +132,7 @@ formatType v = do
 -- eliminates the chain by changing *every* mutable cell in the chain to point
 -- directly to the type at the end of the chain. (This isn't necessary for
 -- correctness; it's just a speed hack.)
-unwrap :: IType s -> ST s (IType s)
+unwrap :: MType s -> ST s (MType s)
 unwrap (ITVar v) = do
   t <- readSTRef v
   case t of
@@ -153,13 +153,13 @@ unwrap other = return other
 -- (An alternative here would be:
 --
 --     data TypeOrConstructor s = TypeOrConstructor {
---         type :: IType s, isConstructor :: Bool }
+--         type :: MType s, isConstructor :: Bool }
 --
 -- but then when analyzing case expressions, we'd have to reverse-engineer the
 -- field types from the constructor type.)
 
-data TypeOrConstructor s = TocType (IType s)
-                         | TocConstructor [IType s] (IType s)
+data TypeOrConstructor s = TocType (MType s)
+                         | TocConstructor [MType s] (MType s)
 
 -- When it's not used in a pattern, a constructor has a type just like
 -- any other binding. A no-argument constructor has a data type;
@@ -195,14 +195,14 @@ multiLookup key (alist:etc) = case lookup key alist of
   Nothing -> multiLookup key etc
   Just v -> Just v
 
-lookupType :: TypeEnv s -> String -> ST s (Maybe (IType s))
+lookupType :: TypeEnv s -> String -> ST s (Maybe (MType s))
 lookupType env name = do
   result <- lookupToc env name
   return $ case result of
     Nothing -> Nothing
     Just toc -> Just (tocToType toc)
 
-lookupConstructorTypes :: TypeEnv s -> Location -> String -> ST s (Maybe ([IType s], IType s))
+lookupConstructorTypes :: TypeEnv s -> Location -> String -> ST s (Maybe ([MType s], MType s))
 lookupConstructorTypes env loc name = do
   mtoc <- lookupToc env name
   return $ case mtoc of
@@ -210,7 +210,7 @@ lookupConstructorTypes env loc name = do
     Just (TocType _) -> Nothing
     Just (TocConstructor argTypes rtype) -> Just (argTypes, rtype)
 
-unify :: TypeEnv s -> Location -> IType s -> IType s -> ST s ()
+unify :: TypeEnv s -> Location -> MType s -> MType s -> ST s ()
 unify env loc expectedType actualType = do
   e <- unwrap expectedType
   a <- unwrap actualType
@@ -235,7 +235,7 @@ popScope :: TypeEnv s -> ST s ()
 popScope env =
   modifySTRef (envScopes env) tail
 
-bind :: TypeEnv s -> Location -> String -> IType s -> ST s ()
+bind :: TypeEnv s -> Location -> String -> MType s -> ST s ()
 bind env loc name bindingType = do
   (scope : outer) <- readSTRef (envScopes env)
   case lookup name scope of
@@ -244,7 +244,7 @@ bind env loc name bindingType = do
   let scope' = (name, TocType bindingType) : scope
   writeSTRef (envScopes env) (scope' : outer)
 
-newTypeVariable :: TypeEnv s -> Location -> ST s (IType s)
+newTypeVariable :: TypeEnv s -> Location -> ST s (MType s)
 newTypeVariable env loc = do
   r <- newSTRef Nothing
   return $ ITVar r
@@ -256,7 +256,7 @@ reportError env loc message =
 
 -- ## Type inference
 
-inferExprType :: TypeEnv s -> Expr -> IType s -> ST s ()
+inferExprType :: TypeEnv s -> Expr -> MType s -> ST s ()
 
 inferExprType env (Expr loc (Name s)) expectedType = do
   result <- lookupType env s
@@ -293,7 +293,7 @@ inferExprType env (Expr _ (Case d cases)) expectedType = do
 
 -- Patterns, too, have types which must be inferred.
 -- They can also have sub-patterns whose types must be inferred recursively.
-inferPatternType :: TypeEnv s -> Pattern -> IType s -> ST s ()
+inferPatternType :: TypeEnv s -> Pattern -> MType s -> ST s ()
 
 inferPatternType env (Pattern _ PWildcard) expectedType = return ()
 
